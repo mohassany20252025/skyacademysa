@@ -1,0 +1,77 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // دالة للتحقق من أن المستخدم مسجل الدخول (سواء طالب عبر Anonymous Auth أو معلم)
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // دالة للتحقق من أن المستخدم هو المعلم المصرح له
+    function isTeacher() {
+      return isAuthenticated() &&
+        request.auth.token.email == "teacher@tafsir-game.com";
+    }
+
+    // دالة للتحقق من صحة بيانات المحاولة عند الإنشاء أو التحديث
+    function isValidAttemptData(data) {
+      return data.keys().hasAll([
+        'attemptId', 'studentUid', 'studentName', 'className',
+        'gameId', 'gameName', 'answers', 'score', 'maxScore',
+        'percentage', 'startedAt', 'submittedAt', 'duration', 'status'
+      ])
+      && data.studentUid is string
+      && data.studentName is string
+      && data.studentName.size() >= 2
+      && data.studentName.size() <= 100
+      && data.className is string
+      && data.gameId is string
+      && data.gameName is string
+      && data.answers is list
+      && data.score is number
+      && data.maxScore is number
+      && data.percentage is number
+      && data.status in ['in_progress', 'completed'];
+    }
+
+
+    // حماية مفاتيح الإجابات الصحيحة (answer_keys) في بيئة الإنتاج:
+    // يمنع منعاً باتاً على الطلاب قراءة مفاتيح الإجابات قبل أو أثناء اللعب؛
+    // التحقق يتم عبر Firebase Cloud Functions (Admin SDK) أو يقرؤها المعلم المصرح له فقط
+    match /answer_keys/{questionId} {
+      allow read: if isTeacher();
+      allow write: if false;
+    }
+
+    // مجموعة الأسئلة العامة للطلاب (public_questions) بدون حقل الإجابة الصحيحة
+    match /public_questions/{questionId} {
+      allow read: if isAuthenticated();
+      allow write: if isTeacher();
+    }
+
+    // قواعد مجموعة المحاولات (attempts)
+    match /attempts/{attemptId} {
+      // القراءة: المعلم المصادق عليه فقط يستطيع قراءة جميع المحاولات
+      // الطالب يستطيع قراءة وثيقة محاولته الحالية فقط أثناء جلسته إذا تطابق studentUid مع request.auth.uid
+      // ولا يستطيع إطلاقاً قراءة إجابات أو نتائج أي طالب آخر
+      allow read: if isTeacher() || (isAuthenticated() && resource.data.studentUid == request.auth.uid);
+
+      // الإنشاء: الطالب المصادق عليه (Anonymous Auth) ينشئ محاولته الخاصة فقط بشرط تطابق studentUid مع request.auth.uid
+      allow create: if isAuthenticated()
+                    && request.resource.data.studentUid == request.auth.uid
+                    && request.resource.data.attemptId == attemptId
+                    && isValidAttemptData(request.resource.data);
+
+      // التحديث: الطالب يستطيع تحديث محاولته الخاصة فقط (أثناء تقدمه في اللعبة أو عند تسليمها) دون تغيير studentUid أو attemptId
+      allow update: if isAuthenticated()
+                    && resource.data.studentUid == request.auth.uid
+                    && request.resource.data.studentUid == request.auth.uid
+                    && request.resource.data.attemptId == resource.data.attemptId
+                    && isValidAttemptData(request.resource.data);
+
+      // الحذف: المعلم فقط يمكنه حذف المحاولات عند الحاجة لإعادة ضبط البيانات
+      allow delete: if isTeacher();
+    }
+  }
+}
